@@ -2,7 +2,8 @@ import wfdb
 import pandas as pd
 
 # Nama file record (tanpa ekstensi .dat atau .hea)
-record_name = 'MIMIC3Dataset/30/3000003/3000003_0007'
+#record_name = 'MIMIC3Dataset/30/3000003/3000003_0007'
+record_name = 'MIMIC3Dataset/30/3000003/3000003_0008'
 
 try:
     # Membaca record menggunakan library wfdb
