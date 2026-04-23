@@ -14,6 +14,7 @@ import warnings
 import serial
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
+import time
 
 ##################################
 ##### 1. Inisialisasi Sistem #####
@@ -60,7 +61,7 @@ def to_signed24(x):
 
 
 # SIMULASI
-df_sim = pd.read_csv('df.csv')
+df_sim = pd.read_csv('df2.csv')
 sim_data = df_sim['ECG'].values # Ambil kolom ECG
 sim_idx = 0
 
@@ -172,55 +173,114 @@ ax_rpp_txt.axis('off')
 rpp_text = ax_rpp_txt.text(0.5, 0.5, "Current RPP: --", fontsize=20, weight='bold', 
                            color="#ff3535", ha='center', va='center')
 
+
+# Komputasi Waktu
+total_comp_times = []
+preprocess_feat_times = []
+predict_times = []
+
 def update(frame):
     global sim_idx, sample_count
-    
-    # Simulasi data masuk (batch 5 sampel agar smooth)
-    for _ in range(5): 
-        simulate_stream()
-    
-    # Update ECG Plot
-    current_data = list(buf)
-    if len(current_data) > 0:
-        # Normalisasi lokal untuk visualisasi
-        raw_np = np.array(current_data)
-        norm_view = (raw_np - raw_np.min())/(raw_np.max() - raw_np.min() + 1e-9)
-        line_ecg.set_data(range(len(norm_view)), norm_view)
-    
-    # Hitung fitur & Prediksi setiap 0.5 detik (FS/2) agar tidak berat
-    if sample_count >= BUF_SZ and sim_idx % 60 == 0:
-        raw = np.array(buf)
-        # Sesuai algoritma preprocessing
-        mn_r, mx_r = raw.min(), raw.max()
-        norm = (raw - mn_r)/(mx_r - mn_r) if mx_r > mn_r else np.zeros_like(raw)
-        env = np.convolve(norm**2, mwi_kernel, mode="same")
+    try:
+        # Simulasi data masuk
+        for _ in range(5): 
+            simulate_stream()
         
-        # Ekstraksi Fitur
-        feats = np.array([
-            mean_feature(env), shape_factor(env), mobility(env),
-            skewness(env), coef_var(env), complexity(env), cm10(env)
-        ]).reshape(1, -1)
+        # Update ECG Plot
+        current_data = list(buf)
+        if len(current_data) > 0:
+            raw_np = np.array(current_data)
+            norm_view = (raw_np - raw_np.min())/(raw_np.max() - raw_np.min() + 1e-9)
+            line_ecg.set_data(range(len(norm_view)), norm_view)
         
-        # Scaling & Prediksi
-        feats_scaled = feat_scaler.transform(feats)
-        sbp_pred = model_sbp.predict(feats_scaled)[0]
-        
-        # Heart Rate & RPP
-        peaks, _ = find_peaks(env, distance=int(0.6 * FS), height=np.mean(env))
-        hr_val = (len(peaks) / BUF_SEC) * 60
-        rpp_val = hr_val * sbp_pred
-        
-        # UPDATE TEXT DISPLAY
-        sbp_text.set_text(f"SBP: {sbp_pred:.0f} mmHg")
-        hr_text.set_text(f"HR: {hr_val:.0f} BPM")
-        rpp_text.set_text(f"Current RPP: {rpp_val:.0f}")
-        
-        # Update Trend RPP
-        rpp_history.append(rpp_val)
-        line_rpp.set_data(range(len(rpp_history)), list(rpp_history))
+        # Benchmark & Prediksi
+        if sample_count >= BUF_SZ and sim_idx % 60 == 0:
+            start_total = time.perf_counter()
+            
+            # --- PHASE 1: PREPROCESSING & FEATURES ---
+            start_pf = time.perf_counter()
+            raw = np.array(buf)
+            mn_r, mx_r = raw.min(), raw.max()
+            norm = (raw - mn_r)/(mx_r - mn_r) if mx_r > mn_r else np.zeros_like(raw)
+            env = np.convolve(norm**2, mwi_kernel, mode="same")
+            
+            feats = np.array([
+                mean_feature(env), shape_factor(env), mobility(env),
+                skewness(env), coef_var(env), complexity(env), cm10(env)
+            ]).reshape(1, -1)
+            end_pf = time.perf_counter()
+            
+            # --- PHASE 2: SCALING & PREDICTION ---
+            start_pred = time.perf_counter()
+            feats_scaled = feat_scaler.transform(feats)
+            sbp_pred = model_sbp.predict(feats_scaled)[0]
+            
+            peaks, _ = find_peaks(env, distance=int(0.6 * FS), height=np.mean(env))
+            hr_val = (len(peaks) / BUF_SEC) * 60
+            rpp_val = hr_val * sbp_pred
+            end_pred = time.perf_counter()
+            
+            # Record Benchmark
+            total_comp_times.append(time.perf_counter() - start_total)
+            preprocess_feat_times.append(end_pf - start_pf)
+            predict_times.append(end_pred - start_pred)
+            
+            # Update GUI Text
+            sbp_text.set_text(f"SBP: {sbp_pred:.0f} mmHg")
+            hr_text.set_text(f"HR: {hr_val:.0f} BPM")
+            rpp_text.set_text(f"Current RPP: {rpp_val:.0f}")
+            
+            rpp_history.append(rpp_val)
+            line_rpp.set_data(range(len(rpp_history)), list(rpp_history))
 
+    except KeyboardInterrupt:
+        plt.close(fig) # Tutup grafik jika Ctrl+C ditekan saat update
+    
     return line_ecg, line_rpp, sbp_text, hr_text, rpp_text
 
+# --- Tambahkan print report saat GUI ditutup ---
+def on_close(event):
+    if not total_comp_times:
+        print("\nData benchmark tidak mencukupi.")
+        return
+
+    print("\n" + "="*30)
+    print("      HASIL BENCHMARK")
+    print("="*30)
+    print(f"Window valid terproses : {len(total_comp_times)}")
+    print("\n[TOTAL PER WINDOW]")
+    print(f"Mean   : {np.mean(total_comp_times):.6f} detik")
+    print(f"Median : {np.median(total_comp_times):.6f} detik")
+    print(f"Std    : {np.std(total_comp_times):.6f} detik")
+    print(f"Min    : {np.min(total_comp_times):.6f} detik")
+    print(f"Max    : {np.max(total_comp_times):.6f} detik")
+
+    print("\n[PREPROCESSING + FEATURE EXTRACTION]")
+    print(f"Mean   : {np.mean(preprocess_feat_times):.6f} detik")
+
+    print("\n[SCALING + PREDICTION]")
+    print(f"Mean   : {np.mean(predict_times):.6f} detik")
+
+    avg_total = np.mean(total_comp_times)
+    ratio = (avg_total / BUF_SEC) * 100
+    print("\n" + "-"*30)
+    print(f"Rata-rata waktu komputasi = {avg_total:.4f} detik")
+    print(f"Rasio terhadap window {BUF_SEC}s = {ratio:.4f}%")
+    print("="*30)
+
+# Sambungkan fungsi close event
+fig.canvas.mpl_connect('close_event', on_close)
+
 plt.tight_layout()
-ani = FuncAnimation(fig, update, interval=20, blit=False)
-plt.show()
+ani = FuncAnimation(fig, update, interval=20, blit=False, cache_frame_data=False)
+
+print("Memulai simulasi... Tekan Ctrl+C di terminal untuk berhenti.")
+
+try:
+    plt.show()
+except KeyboardInterrupt:
+    print("\nInterupsi terdeteksi, menutup sistem...")
+    plt.close('all') # Memaksa semua window Matplotlib tertutup
+    on_close(None)   # Panggil fungsi report secara manual
+finally:
+    print("Selesai.")
