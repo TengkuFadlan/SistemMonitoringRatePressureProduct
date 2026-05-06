@@ -1,3 +1,12 @@
+# Dataset
+df.csv
+df2.csv
+df3.csv
+rf2_sbp.pkl
+rf2_dbp.pkl
+params.pkl
+feat_scaler.pkl
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]

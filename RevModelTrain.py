@@ -7,7 +7,7 @@ from scipy.signal import butter, filtfilt, iirnotch, medfilt, find_peaks
 import joblib
 
 # ── 1) LOAD DATA
-df = pd.read_csv('df2.csv')
+df = pd.read_csv('df3.csv')
 fs = 125 # Hz sampling rate
 dt = 1/fs # 0.008 detik (interval antar sampel)
 
@@ -15,7 +15,6 @@ dt = 1/fs # 0.008 detik (interval antar sampel)
 df['time'] = np.arange(len(df)) * dt
 
 # ── 2) DEFINISI FILTER STANDAR
-# Menggunakan normalisasi Nyquist adalah standar yang menunjukkan pemahaman DSP yang baik
 def bandpass_filter(data, lowcut=0.5, highcut=40.0, fs=fs, order=4):
     nyq = 0.5 * fs
     low = lowcut / nyq
@@ -36,7 +35,9 @@ ecg_clean = bandpass_filter(ecg_raw)
 ecg_clean = notch_filter(ecg_clean)
 
 # Step 2: Normalisasi
-# Dinormalisasi agar variasi amplitudo antar subjek tidak membuat model ML bias
+# Dinormalisasi dengan Z-Score Normalization (Standardization) agar variasi amplitudo antar subjek tidak membuat model ML bias
+# Mean µ = 0
+# Standar Deviasi σ = 1
 ecg_mean, ecg_std = ecg_clean.mean(), ecg_clean.std()
 ecg_norm = (ecg_clean - ecg_mean) / ecg_std
 joblib.dump({'mean': ecg_mean, 'std': ecg_std}, 'params.pkl')
@@ -57,7 +58,7 @@ y_mwi = np.convolve(y_sq, np.ones(mwi_win)/mwi_win, mode='same')
 df['ecg_preproc'] = y_mwi
 
 # ── 4) EPOCH-LEVEL ABP EXTRACTION
-# Bagian ini sudah oke karena ABP (mmHg) diolah per waktu dalam detik
+# ABP (mmHg) diolah per waktu dalam detik
 epoch_sec = 20
 samples_per_epoch = fs * epoch_sec
 kernel = int(0.2 * fs)
@@ -76,7 +77,8 @@ for i in range(num_epochs):
     abp_smooth = medfilt(abp_seg, kernel_size=kernel)
     
     # Deteksi Systolic (Mencari puncak tekanan darah)
-    locs_s, _ = find_peaks(abp_smooth, distance=int(0.25 * fs))
+    # t = 0.333 detik (Batas maks ~180 BPM)
+    locs_s, _ = find_peaks(abp_smooth, distance=int(0.333 * fs))
     vals_s = abp_seg[locs_s]
     
     # Deteksi Diastolic (Mencari lembah tekanan darah)
@@ -205,11 +207,11 @@ for (start, end) in epoch_indices:
     # Hitung semua fitur menggunakan fungsi yang sudah diperbaiki di Tahap 2
     feature_dict = {
         # --- 7 Fitur Utama ---
-        'ecg_mean': mean_feature(ecg_epoch),
+        #'ecg_mean': mean_feature(ecg_epoch),
         'ecg_sf': shape_factor(ecg_epoch),
         'ecg_mobility': hjorth_mobility(ecg_epoch, fs=fs),
         'ecg_skewness': skewness(ecg_epoch),
-        'ecg_cv': coefficient_of_variation(ecg_epoch),
+        #'ecg_cv': coefficient_of_variation(ecg_epoch),
         'ecg_complexity': hjorth_complexity(ecg_epoch, fs=fs),
         'ecg_cm10': central_moment_10(ecg_epoch),
         
@@ -252,7 +254,8 @@ from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import MinMaxScaler
 
 # 1) Definisi Fitur & Target
-feature_columns = ["ecg_mean", "ecg_sf", "ecg_mobility", "ecg_skewness", "ecg_cv", "ecg_complexity", "ecg_cm10"]
+#feature_columns = ["ecg_mean", "ecg_sf", "ecg_mobility", "ecg_skewness", "ecg_cv", "ecg_complexity", "ecg_cm10"]
+feature_columns = ["ecg_sf", "ecg_mobility", "ecg_skewness", "ecg_complexity", "ecg_cm10"]
 target_sbp = "systolic"
 
 epoch_df.dropna(inplace=True)
