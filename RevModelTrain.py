@@ -7,7 +7,7 @@ from scipy.signal import butter, filtfilt, iirnotch, medfilt, find_peaks
 import joblib
 
 # ── 1) LOAD DATA
-df = pd.read_csv('df3.csv')
+df = pd.read_csv('df.csv')
 fs = 125 # Hz sampling rate
 dt = 1/fs # 0.008 detik (interval antar sampel)
 
