@@ -232,6 +232,92 @@ def classify_hemodynamic_flag(phase, sbp, hr, baseline_sbp, baseline_hr):
     return "Flag tidak tersedia", "#94a3b8"
 
 
+# =========================
+# 2A. QUALITY CHECK ECG
+# =========================
+MIN_HR_BPM = 40
+MAX_HR_BPM = 220
+MAX_FLATLINE_PCT = 0.20
+MAX_CLIP_PCT = 0.05
+MAX_BASELINE_STD = 0.35
+MIN_PEAKS = 8
+MAX_PEAKS = 80
+MAX_RR_CV = 0.25
+
+
+def moving_average(x, w):
+    if w <= 1:
+        return x.copy()
+    k = np.ones(w) / w
+    return np.convolve(x, k, mode="same")
+
+
+def robust_zscore(x):
+    med = np.median(x)
+    mad = np.median(np.abs(x - med)) + 1e-9
+    return 0.6745 * (x - med) / mad
+
+
+def detect_flatline_ratio(x, eps=1e-6):
+    dx = np.abs(np.diff(x))
+    return np.mean(dx < eps)
+
+
+def detect_clip_ratio(x):
+    z = robust_zscore(x)
+    return np.mean(np.abs(z) > 8.0)
+
+
+def ecg_quality_check(ecg_raw, ecg_clean, y_mwi, peaks, fs=FS):
+    reasons = []
+
+    # 1) Flatline / data nyangkut
+    flat_ratio = detect_flatline_ratio(ecg_raw)
+    if flat_ratio > MAX_FLATLINE_PCT:
+        reasons.append(f"flatline tinggi ({flat_ratio:.2f})")
+
+    # 2) Clip / outlier ekstrem
+    clip_ratio = detect_clip_ratio(ecg_raw)
+    if clip_ratio > MAX_CLIP_PCT:
+        reasons.append(f"outlier ekstrem ({clip_ratio:.2f})")
+
+    # 3) Baseline wander besar
+    baseline = moving_average(ecg_clean, int(1.0 * fs))
+    baseline_std = np.std(baseline) / (np.std(ecg_clean) + 1e-9)
+    if baseline_std > MAX_BASELINE_STD:
+        reasons.append(f"baseline drift tinggi ({baseline_std:.2f})")
+
+    # 4) Jumlah peak tidak masuk akal
+    n_peaks = len(peaks)
+    if n_peaks < MIN_PEAKS or n_peaks > MAX_PEAKS:
+        reasons.append(f"jumlah peak tidak wajar ({n_peaks})")
+
+    # 5) HR range check
+    hr_est = (n_peaks / BUF_SEC) * 60.0
+    if hr_est < MIN_HR_BPM or hr_est > MAX_HR_BPM:
+        reasons.append(f"HR tidak masuk akal ({hr_est:.1f} bpm)")
+
+    # 6) RR interval stability check
+    if n_peaks >= 3:
+        rr = np.diff(peaks) / fs
+        rr_cv = np.std(rr) / (np.mean(rr) + 1e-9)
+        if rr_cv > MAX_RR_CV:
+            reasons.append(f"RR tidak stabil ({rr_cv:.2f})")
+    else:
+        rr_cv = None
+
+    is_good = len(reasons) == 0
+    return {
+        "is_good": is_good,
+        "hr_est": hr_est,
+        "flat_ratio": flat_ratio,
+        "clip_ratio": clip_ratio,
+        "baseline_std_ratio": baseline_std,
+        "rr_cv": rr_cv,
+        "reasons": "; ".join(reasons) if reasons else "OK",
+    }
+
+
 class ShimmerReader(QObject):
     def __init__(self):
         super().__init__()
@@ -476,6 +562,7 @@ class RPPMonitorWindow(QMainWindow):
         self.benchmark_label = QLabel("Benchmark: --")
         self.hemo_label = QLabel("Flag hemodinamik: --")
         self.hrr_label = QLabel("HRR: --")
+        self.qc_label = QLabel("Kualitas Sinyal: --")
 
         for w in [
             self.delta_label,
@@ -485,6 +572,7 @@ class RPPMonitorWindow(QMainWindow):
             self.benchmark_label,
             self.hemo_label,
             self.hrr_label,
+            self.qc_label,
         ]:
             w.setObjectName("DetailText")
             extra_layout.addWidget(w)
@@ -635,6 +723,8 @@ class RPPMonitorWindow(QMainWindow):
         self.recovery_pct_label.setText("%Recovery: --")
         self.hemo_label.setText("Flag hemodinamik: --")
         self.hrr_label.setText("HRR: --")
+        self.qc_label.setText("Kualitas Sinyal: --")
+        self.qc_label.setStyleSheet("")
 
     def start_phase_session(self):
         phase_name = self.phase_combo.currentText()
@@ -742,6 +832,13 @@ class RPPMonitorWindow(QMainWindow):
                 self.preprocess_feat_times.append(end_pf - start_pf)
                 self.predict_times.append(end_pred - start_pred)
                 self.total_comp_times.append(end_total - start_total)
+
+                qc_result = ecg_quality_check(raw, ecg_clean, y_mwi, peaks)
+                qc_color = "#22c55e" if qc_result["is_good"] else "#ef4444"
+                self.qc_label.setText(
+                    f"Kualitas Sinyal: {'BAIK' if qc_result['is_good'] else 'BERMASALAH'}"
+                )
+                self.qc_label.setStyleSheet(f"color: {qc_color};")
 
                 phase = self.selected_phase
 
@@ -874,6 +971,12 @@ class RPPMonitorWindow(QMainWindow):
                         "load_status": load_label,
                         "recovery_status": rec_label,
                         "hemodynamic_flag": hemo_label,
+                        "qc_status": "BAIK" if qc_result["is_good"] else "BERMASALAH",
+                        "qc_reasons": qc_result["reasons"],
+                        "qc_flat_ratio": qc_result["flat_ratio"],
+                        "qc_clip_ratio": qc_result["clip_ratio"],
+                        "qc_baseline_std_ratio": qc_result["baseline_std_ratio"],
+                        "qc_rr_cv": qc_result["rr_cv"],
                     }
                 )
 
