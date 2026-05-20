@@ -29,7 +29,7 @@ def bandpass_filter(data, lowcut=0.5, highcut=40.0, fs=fs, order=4):
     nyq = 0.5 * fs
     low = lowcut / nyq
     high = highcut / nyq
-    b, a = butter(order, [low, high], btype="band")
+    b, a = butter(order, [low, high], btype="band")  # type: ignore
     return filtfilt(b, a, data)
 
 
@@ -219,7 +219,10 @@ for r in range(1, len(all_feature_columns) + 1):
         X_test_scaled = scaler.transform(X_test)
 
         rf_sbp = RandomForestRegressor(
-            n_estimators=500, max_features="sqrt", random_state=42, n_jobs=-1
+            n_estimators=500,
+            max_features="sqrt",  # type: ignore
+            random_state=42,
+            n_jobs=-1,  # type: ignore
         )
         rf_sbp.fit(X_train_scaled, y_train)
 
@@ -253,7 +256,7 @@ print(results_df.head(10).to_string(index=False))
 
 print("\n===== HASIL TERBAIK =====")
 print("Fitur terbaik :", best_features)
-print("Jumlah fitur  :", len(best_features))
+print("Jumlah fitur  :", len(best_features))  # type: ignore
 print(f"R2 terbaik    : {results_df.loc[0, 'R2']:.4f}")
 print(f"MAE terbaik   : {results_df.loc[0, 'MAE']:.4f} mmHg")
 print(f"MAPE terbaik  : {results_df.loc[0, 'MAPE']:.4f} %")
@@ -267,4 +270,3 @@ print("\nHasil kombinasi fitur disimpan ke: hasil_kombinasi_fitur_sbp.csv")
 print("Model terbaik disimpan ke: best_rf_sbp.pkl")
 print("Scaler terbaik disimpan ke: best_feat_scaler.pkl")
 print("Daftar fitur terbaik disimpan ke: best_feature_columns.pkl")
-

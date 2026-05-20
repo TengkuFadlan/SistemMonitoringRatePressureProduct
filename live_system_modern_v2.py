@@ -82,7 +82,7 @@ def shape_factor(x):
 
 def mobility(x):
     vs = np.var(x, ddof=1)
-    vd = np.var(np.diff(x), ddof=1) if x.size > 1 else 0.0
+    vd = np.var(np.diff(x) * FS, ddof=1) if x.size > 1 else 0.0
     return np.sqrt(vd / vs) if vs else 0.0
 
 
@@ -111,7 +111,7 @@ def bandpass_filter(data, lowcut=0.5, highcut=40.0, fs=FS, order=4):
     nyq = 0.5 * fs
     low = lowcut / nyq
     high = highcut / nyq
-    b, a = butter(order, [low, high], btype="band")
+    b, a = butter(order, [low, high], btype="band")  # type: ignore
     return filtfilt(b, a, data)
 
 
@@ -236,7 +236,7 @@ def classify_hemodynamic_flag(phase, sbp, hr, baseline_sbp, baseline_hr):
 # 2A. QUALITY CHECK ECG
 # =========================
 MIN_HR_BPM = 40
-MAX_HR_BPM = 220
+MAX_HR_BPM = 180
 MAX_FLATLINE_PCT = 0.20
 MAX_CLIP_PCT = 0.05
 MAX_BASELINE_STD = 0.35
@@ -684,7 +684,7 @@ class RPPMonitorWindow(QMainWindow):
             pw.getAxis("bottom").setTextPen(fg)
             pw.getAxis("left").setPen(pg.mkPen(fg))
             pw.getAxis("bottom").setPen(pg.mkPen(fg))
-            pw.getPlotItem().titleLabel.item.setDefaultTextColor(fg)
+            pw.getPlotItem().titleLabel.item.setDefaultTextColor(fg)  # type: ignore
 
     def _connect_signals(self):
         self.btn_connect.clicked.connect(self.connect_shimmer)
