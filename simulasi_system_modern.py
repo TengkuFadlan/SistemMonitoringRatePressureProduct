@@ -6,7 +6,7 @@ from datetime import datetime
 
 import numpy as np
 import pandas as pd
-from scipy.signal import butter, filtfilt, iirnotch, find_peaks
+from scipy.signal import butter, filtfilt, iirnotch, medfilt, find_peaks
 import joblib
 
 from PySide6.QtCore import QTimer, QObject
@@ -70,7 +70,7 @@ def shape_factor(x):
 
 def mobility(x):
     vs = np.var(x, ddof=1)
-    vd = np.var(np.diff(x), ddof=1) if x.size > 1 else 0.0
+    vd = np.var(np.diff(x) * FS, ddof=1) if x.size > 1 else 0.0
     return np.sqrt(vd / vs) if vs else 0.0
 
 
@@ -106,6 +106,25 @@ def bandpass_filter(data, lowcut=0.5, highcut=40.0, fs=FS, order=4):
 def notch_filter(data, f0=50.0, Q=30.0, fs=FS):
     b, a = iirnotch(f0 / (0.5 * fs), Q)
     return filtfilt(b, a, data)
+
+
+def extract_actual_sbp(abp_segment, fs=FS, epoch_sec=BUF_SEC):
+    if abp_segment is None or len(abp_segment) < BUF_SZ:
+        return None
+
+    kernel = int(0.2 * fs)
+    if kernel % 2 == 0:
+        kernel += 1
+
+    abp_smooth = medfilt(abp_segment, kernel_size=kernel)
+    locs_s, _ = find_peaks(abp_smooth, distance=int(0.333 * fs))
+    vals_s = abp_segment[locs_s]
+
+    if vals_s.size == 0:
+        return None
+
+    sbp = np.median(np.sort(vals_s)[-epoch_sec:])
+    return float(sbp)
 
 
 def safe_mean(values):
@@ -226,17 +245,30 @@ class CSVECGReader(QObject):
     def __init__(self):
         super().__init__()
         self.buf = deque(maxlen=BUF_SZ)
+        self.abp_buf = deque(maxlen=BUF_SZ)
         self.sample_count = 0
 
         self.ecg_data = None
+        self.abp_data = None
         self.ptr = 0
         self.is_loaded = False
         self.is_streaming = False
+        self.has_abp = False
 
         self.chunk_size = max(1, FS // 20)  # cocok untuk timer 50 ms
 
-    def load_csv(self, file_path, ecg_col="ECG"):
-        df = pd.read_csv(file_path, usecols=[ecg_col])
+    def load_csv(self, file_path, ecg_col="ECG", abp_col="ABP"):
+        cols = [ecg_col]
+        has_abp_col = False
+        try:
+            header = pd.read_csv(file_path, nrows=0).columns
+            if abp_col in header:
+                cols.append(abp_col)
+                has_abp_col = True
+        except Exception:
+            pass
+
+        df = pd.read_csv(file_path, usecols=cols)
         ecg = pd.to_numeric(df[ecg_col], errors="coerce").dropna().to_numpy(dtype=float)
 
         if len(ecg) < BUF_SZ:
@@ -246,9 +278,22 @@ class CSVECGReader(QObject):
             )
 
         self.ecg_data = ecg
+        self.abp_data = None
+        self.has_abp = False
+        if has_abp_col:
+            abp = (
+                pd.to_numeric(df[abp_col], errors="coerce")
+                .dropna()
+                .to_numpy(dtype=float)
+            )
+            if len(abp) >= BUF_SZ:
+                self.abp_data = abp
+                self.has_abp = True
+
         self.ptr = 0
         self.sample_count = 0
         self.buf.clear()
+        self.abp_buf.clear()
         self.is_loaded = True
         self.is_streaming = False
 
@@ -270,6 +315,12 @@ class CSVECGReader(QObject):
         for sample in chunk:
             self.buf.append(sample)
             self.sample_count += 1
+
+        if self.abp_data is not None:
+            abp_end = min(self.ptr + self.chunk_size, len(self.abp_data))
+            abp_chunk = self.abp_data[self.ptr : abp_end]
+            for sample in abp_chunk:
+                self.abp_buf.append(sample)
 
         self.ptr = end_ptr
 
@@ -335,10 +386,14 @@ class RPPMonitorWindow(QMainWindow):
         self.recovery_rpp_values = []
         self.rest_hr_values = []
         self.rest_sbp_values = []
+        self.rest_actual_sbp_values = []
 
         self.baseline_rpp = None
         self.baseline_hr = None
         self.baseline_sbp = None
+
+        self.sbp_pred_all = []
+        self.sbp_actual_all = []
 
         self.post_peak_rpp = None
         self.post_peak_hr = None
@@ -431,20 +486,24 @@ class RPPMonitorWindow(QMainWindow):
         top_cards.setVerticalSpacing(14)
         self.card_hr = MetricCard("Heart Rate", "-- BPM", "#fbbf24")
         self.card_sbp = MetricCard("Predicted SBP", "-- mmHg", "#60a5fa")
+        self.card_actual_sbp = MetricCard("Actual SBP (ABP)", "-- mmHg", "#a78bfa")
         self.card_rpp = MetricCard("Current RPP", "--", "#f87171")
         self.card_phase = MetricCard("Fase Aktif", "--", "#34d399")
         self.card_load = MetricCard("Status Beban", "--", "#c084fc")
         self.card_recovery = MetricCard("Status Recovery", "--", "#38bdf8")
+        self.card_sbp_error = MetricCard("SBP Error (MAE)", "-- mmHg", "#fb923c")
 
         cards = [
             self.card_hr,
             self.card_sbp,
+            self.card_actual_sbp,
             self.card_rpp,
             self.card_phase,
             self.card_load,
             self.card_recovery,
+            self.card_sbp_error,
         ]
-        positions = [(0, 0), (0, 1), (0, 2), (1, 0), (1, 1), (1, 2)]
+        positions = [(0, 0), (0, 1), (0, 2), (0, 3), (1, 0), (1, 1), (1, 2), (1, 3)]
         for card, pos in zip(cards, positions):
             top_cards.addWidget(card, *pos)
 
@@ -484,6 +543,9 @@ class RPPMonitorWindow(QMainWindow):
         self.benchmark_label = QLabel("Benchmark: --")
         self.hemo_label = QLabel("Flag hemodinamik: --")
         self.hrr_label = QLabel("HRR: --")
+        self.sbp_mape_label = QLabel("SBP MAPE: --")
+        self.sbp_r2_label = QLabel("SBP R²: --")
+        self.sbp_n_label = QLabel("SBP Samples: --")
 
         for w in [
             self.delta_label,
@@ -493,6 +555,9 @@ class RPPMonitorWindow(QMainWindow):
             self.benchmark_label,
             self.hemo_label,
             self.hrr_label,
+            self.sbp_mape_label,
+            self.sbp_r2_label,
+            self.sbp_n_label,
         ]:
             w.setObjectName("DetailText")
             extra_layout.addWidget(w)
@@ -642,16 +707,23 @@ class RPPMonitorWindow(QMainWindow):
     def reset_session_display_only(self):
         self.current_session_logs = []
         self.rpp_history.clear()
+        self.sbp_pred_all = []
+        self.sbp_actual_all = []
         self.card_hr.update_card("-- BPM", "Realtime")
         self.card_sbp.update_card("-- mmHg", "Prediksi")
+        self.card_actual_sbp.update_card("-- mmHg", "Dari ABP")
         self.card_rpp.update_card("--", "RPP aktif")
         self.card_phase.update_card("--", "Pilih fase")
         self.card_load.update_card("--", "Belum ada")
         self.card_recovery.update_card("--", "Belum ada")
+        self.card_sbp_error.update_card("-- mmHg", "SBP Error")
         self.delta_label.setText("ΔRPP: --")
         self.recovery_pct_label.setText("%Recovery: --")
         self.hemo_label.setText("Flag hemodinamik: --")
         self.hrr_label.setText("HRR: --")
+        self.sbp_mape_label.setText("SBP MAPE: --")
+        self.sbp_r2_label.setText("SBP R²: --")
+        self.sbp_n_label.setText("SBP Samples: --")
 
     def start_phase_session(self):
         if not self.reader.is_loaded:
@@ -776,12 +848,37 @@ class RPPMonitorWindow(QMainWindow):
                 self.predict_times.append(end_pred - start_pred)
                 self.total_comp_times.append(end_total - start_total)
 
+                actual_sbp = None
+                if self.reader.has_abp and len(self.reader.abp_buf) >= BUF_SZ:
+                    actual_sbp = extract_actual_sbp(np.array(self.reader.abp_buf))
+
+                if actual_sbp is not None:
+                    self.sbp_pred_all.append(sbp_pred)
+                    self.sbp_actual_all.append(actual_sbp)
+
+                mae_val = None
+                mape_val = None
+                r2_val = None
+                if len(self.sbp_pred_all) >= 2 and len(self.sbp_actual_all) >= 2:
+                    pred_arr = np.array(self.sbp_pred_all)
+                    actual_arr = np.array(self.sbp_actual_all)
+                    mae_val = float(np.mean(np.abs(pred_arr - actual_arr)))
+                    mape_val = float(
+                        np.mean(np.abs((actual_arr - pred_arr) / (actual_arr + 1e-9)))
+                        * 100
+                    )
+                    ss_res = np.sum((actual_arr - pred_arr) ** 2)
+                    ss_tot = np.sum((actual_arr - np.mean(actual_arr)) ** 2)
+                    r2_val = float(1 - ss_res / ss_tot) if ss_tot > 1e-9 else None
+
                 phase = self.selected_phase
 
                 if phase == "REST":
                     self.rest_rpp_values.append(rpp_val)
                     self.rest_hr_values.append(hr_val)
                     self.rest_sbp_values.append(sbp_pred)
+                    if actual_sbp is not None:
+                        self.rest_actual_sbp_values.append(actual_sbp)
 
                     self.baseline_rpp = safe_mean(self.rest_rpp_values)
                     self.baseline_hr = safe_mean(self.rest_hr_values)
@@ -839,6 +936,14 @@ class RPPMonitorWindow(QMainWindow):
                 self.card_sbp.update_card(
                     f"{sbp_pred:.1f} mmHg", "Estimasi model RF", "#60a5fa"
                 )
+                if actual_sbp is not None:
+                    self.card_actual_sbp.update_card(
+                        f"{actual_sbp:.1f} mmHg", "Dari sinyal ABP", "#a78bfa"
+                    )
+                else:
+                    self.card_actual_sbp.update_card(
+                        "-- mmHg", "ABP tidak tersedia", "#94a3b8"
+                    )
                 self.card_rpp.update_card(
                     f"{rpp_val:.0f}", "Rate Pressure Product", "#f87171"
                 )
@@ -852,6 +957,16 @@ class RPPMonitorWindow(QMainWindow):
                 self.card_recovery.update_card(
                     rec_label, "Respons pemulihan", rec_color
                 )
+                if mae_val is not None:
+                    self.card_sbp_error.update_card(
+                        f"{mae_val:.2f} mmHg",
+                        f"Prediksi vs ABP (n={len(self.sbp_pred_all)})",
+                        "#fb923c",
+                    )
+                else:
+                    self.card_sbp_error.update_card(
+                        "-- mmHg", "Menunggu data cukup", "#94a3b8"
+                    )
 
                 self.delta_label.setText(
                     f"ΔRPP: {delta_rpp:+.0f}" if delta_rpp is not None else "ΔRPP: --"
@@ -875,6 +990,15 @@ class RPPMonitorWindow(QMainWindow):
                 self.hrr_label.setText(
                     f"HRR: {hrr_val:.1f} bpm" if hrr_val is not None else "HRR: --"
                 )
+                self.sbp_mape_label.setText(
+                    f"SBP MAPE: {mape_val:.2f}%"
+                    if mape_val is not None
+                    else "SBP MAPE: --"
+                )
+                self.sbp_r2_label.setText(
+                    f"SBP R²: {r2_val:.4f}" if r2_val is not None else "SBP R²: --"
+                )
+                self.sbp_n_label.setText(f"SBP Samples: {len(self.sbp_pred_all)}")
 
                 if self.total_comp_times:
                     avg_total = np.mean(self.total_comp_times)
@@ -892,7 +1016,8 @@ class RPPMonitorWindow(QMainWindow):
                         "sample_count": self.reader.sample_count,
                         "phase": phase,
                         "hr_bpm": hr_val,
-                        "sbp_mmhg": sbp_pred,
+                        "sbp_pred_mmhg": sbp_pred,
+                        "sbp_actual_mmhg": actual_sbp,
                         "rpp": rpp_val,
                         "baseline_hr": self.baseline_hr,
                         "baseline_sbp": self.baseline_sbp,
@@ -908,6 +1033,9 @@ class RPPMonitorWindow(QMainWindow):
                         "load_status": load_label,
                         "recovery_status": rec_label,
                         "hemodynamic_flag": hemo_label,
+                        "sbp_mae": mae_val,
+                        "sbp_mape": mape_val,
+                        "sbp_r2": r2_val,
                     }
                 )
 

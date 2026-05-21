@@ -430,6 +430,9 @@ class RPPMonitorWindow(QMainWindow):
         self.preprocess_feat_times = []
         self.predict_times = []
 
+        self.qc_bad_streak = 0
+        self.qc_consecutive_required = 3
+
         self._build_ui()
         self._apply_theme()
         self._connect_signals()
@@ -713,6 +716,7 @@ class RPPMonitorWindow(QMainWindow):
     def reset_session_display_only(self):
         self.current_session_logs = []
         self.rpp_history.clear()
+        self.qc_bad_streak = 0
         self.card_hr.update_card("-- BPM", "Realtime")
         self.card_sbp.update_card("-- mmHg", "Prediksi")
         self.card_rpp.update_card("--", "RPP aktif")
@@ -839,6 +843,16 @@ class RPPMonitorWindow(QMainWindow):
                     f"Kualitas Sinyal: {'BAIK' if qc_result['is_good'] else 'BERMASALAH'}"
                 )
                 self.qc_label.setStyleSheet(f"color: {qc_color};")
+
+                if not qc_result["is_good"]:
+                    self.qc_bad_streak += 1
+                    reasons = qc_result["reasons"]
+                    self._set_status_message(
+                        f"Window di-skip (QC buruk #{self.qc_bad_streak}): {reasons}"
+                    )
+                    return
+
+                self.qc_bad_streak = 0
 
                 phase = self.selected_phase
 
