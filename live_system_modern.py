@@ -107,6 +107,29 @@ def cm10(x):
     return np.mean((x - mu) ** 10)
 
 
+def ecg_mean(x):
+    return np.mean(x)
+
+
+def coefficient_of_variation(x):
+    mu = np.mean(x)
+    s = np.std(x, ddof=1)
+    if mu == 0:
+        return 0.0
+    return (s / mu) * 100
+
+
+FEATURE_FUNCS = {
+    "ecg_sf":            shape_factor,
+    "ecg_mobility":      mobility,
+    "ecg_skewness":      skewness,
+    "ecg_complexity":    complexity,
+    "ecg_cm10":          cm10,
+    "ecg_mean":          ecg_mean,
+    "ecg_cv":            coefficient_of_variation,
+}
+
+
 def bandpass_filter(data, lowcut=0.5, highcut=40.0, fs=FS, order=4):
     nyq = 0.5 * fs
     low = lowcut / nyq
@@ -808,14 +831,9 @@ class RPPMonitorWindow(QMainWindow):
                 y_sq = y_der**2
                 y_mwi = np.convolve(y_sq, mwi_kernel, mode="same")
 
+                feature_names = self.feat_scaler.feature_names_in_
                 feats = np.array(
-                    [
-                        shape_factor(ecg_clean),
-                        mobility(ecg_clean),
-                        skewness(ecg_clean),
-                        complexity(ecg_clean),
-                        cm10(ecg_clean),
-                    ]
+                    [FEATURE_FUNCS[f](ecg_clean) for f in feature_names]
                 ).reshape(1, -1)
 
                 end_pf = time.perf_counter()

@@ -1,4 +1,5 @@
 import matplotlib
+
 matplotlib.use("Agg")
 
 import matplotlib.pyplot as plt
@@ -31,9 +32,12 @@ def interpolate_nans(arr):
     if len(good) < 2:
         arr[mask] = 0.0
         return arr
-    f = interpolate.interp1d(good, arr[good], kind="linear", bounds_error=False, fill_value="extrapolate")
+    f = interpolate.interp1d(
+        good, arr[good], kind="linear", bounds_error=False, fill_value="extrapolate"
+    )
     arr[mask] = f(bad)
     return arr
+
 
 FS = 125
 DT = 1 / FS
@@ -53,7 +57,7 @@ def notch_filter(data, f0=50.0, Q=30.0, fs=FS):
 
 
 def shape_factor(signal):
-    xrms = np.sqrt(np.mean(signal ** 2))
+    xrms = np.sqrt(np.mean(signal**2))
     mean_sqrt_abs = np.mean(np.sqrt(np.abs(signal)))
     return xrms / mean_sqrt_abs if mean_sqrt_abs != 0 else 0.0
 
@@ -72,7 +76,7 @@ def skewness(x):
     std_x = np.std(x, ddof=1)
     if std_x == 0:
         return 0.0
-    return np.sum((x - mean_x) ** 3) / ((n - 1) * (std_x ** 3))
+    return np.sum((x - mean_x) ** 3) / ((n - 1) * (std_x**3))
 
 
 def hjorth_complexity(signal, fs=FS):
@@ -99,7 +103,7 @@ feature_columns = [
     "ecg_mobility",
     "ecg_skewness",
     "ecg_complexity",
-    "ecg_cm10",
+    # "ecg_cm10",
 ]
 target_sbp = "systolic"
 
@@ -119,7 +123,7 @@ def process_dataset(filepath):
     ecg_norm = (ecg_clean - ecg_mean) / ecg_std
 
     y_der = np.gradient(ecg_norm, dt)
-    y_sq = y_der ** 2
+    y_sq = y_der**2
     mwi_win = int(0.150 * fs)
     y_mwi = np.convolve(y_sq, np.ones(mwi_win) / mwi_win, mode="same")
 
@@ -147,7 +151,7 @@ def process_dataset(filepath):
 
         locs_d = []
         for j in range(len(locs_s) - 1):
-            seg = abp_smooth[locs_s[j]: locs_s[j + 1]]
+            seg = abp_smooth[locs_s[j] : locs_s[j + 1]]
             if seg.size:
                 trough = np.argmin(seg)
                 locs_d.append(locs_s[j] + trough)
@@ -170,7 +174,7 @@ def process_dataset(filepath):
             "ecg_mobility": hjorth_mobility(ecg_epoch, fs=fs),
             "ecg_skewness": skewness(ecg_epoch),
             "ecg_complexity": hjorth_complexity(ecg_epoch, fs=fs),
-            "ecg_cm10": central_moment_10(ecg_epoch),
+            # "ecg_cm10": central_moment_10(ecg_epoch),
         }
         all_features.append(feature_dict)
 
@@ -190,7 +194,11 @@ def main():
     all_ecg_stats = []
 
     csv_files = sorted(
-        [f for f in os.listdir(dataset_dir) if f.endswith(".csv") and f != "DataIndices.csv"],
+        [
+            f
+            for f in os.listdir(dataset_dir)
+            if f.endswith(".csv") and f != "DataIndices.csv"
+        ],
         key=lambda x: int(x.replace(".csv", "")),
     )
 
@@ -215,7 +223,9 @@ def main():
             all_ecg_stats.append(stats)
 
             elapsed = time.time() - t0
-            print(f"{len(epoch_df):<8} {epoch_df[target_sbp].min():.0f}-{epoch_df[target_sbp].max():.0f} mmHg{'':>8} {elapsed:.1f}s")
+            print(
+                f"{len(epoch_df):<8} {epoch_df[target_sbp].min():.0f}-{epoch_df[target_sbp].max():.0f} mmHg{'':>8} {elapsed:.1f}s"
+            )
         except Exception as e:
             elapsed = time.time() - t0
             print(f"ERROR: {e} ({elapsed:.1f}s)")
@@ -229,13 +239,19 @@ def main():
 
     print(f"\n{'=' * 60}")
     print(f"Combined: {len(combined_df)} epochs across {len(label_counts)} datasets")
-    print(f"SBP range: {combined_df[target_sbp].min():.0f} - {combined_df[target_sbp].max():.0f} mmHg")
-    print(f"SBP mean +/- std: {combined_df[target_sbp].mean():.1f} +/- {combined_df[target_sbp].std():.1f} mmHg")
+    print(
+        f"SBP range: {combined_df[target_sbp].min():.0f} - {combined_df[target_sbp].max():.0f} mmHg"
+    )
+    print(
+        f"SBP mean +/- std: {combined_df[target_sbp].mean():.1f} +/- {combined_df[target_sbp].std():.1f} mmHg"
+    )
     print()
     print("Per-dataset epoch counts:")
     for ds, cnt in label_counts.items():
         ds_df = combined_df[combined_df["dataset"] == ds]
-        print(f"  Dataset {ds:.0f}: {cnt} epochs (SBP {ds_df[target_sbp].min():.0f}-{ds_df[target_sbp].max():.0f} mmHg)")
+        print(
+            f"  Dataset {ds:.0f}: {cnt} epochs (SBP {ds_df[target_sbp].min():.0f}-{ds_df[target_sbp].max():.0f} mmHg)"
+        )
 
     X_all = combined_df[feature_columns]
     y_all = combined_df[target_sbp].values
@@ -249,7 +265,9 @@ def main():
     X_train_scaled = scaler.fit_transform(X_train)
     X_test_scaled = scaler.transform(X_test)
 
-    rf_sbp = RandomForestRegressor(n_estimators=500, max_features="sqrt", random_state=42, n_jobs=-1)
+    rf_sbp = RandomForestRegressor(
+        n_estimators=500, max_features="sqrt", random_state=42, n_jobs=-1
+    )
     print(f"\nTraining Random Forest (500 trees) on {len(X_train)} samples...")
     train_t0 = time.time()
     rf_sbp.fit(X_train_scaled, y_train)
@@ -277,7 +295,9 @@ def main():
     print(f"  Test samples: {len(y_test)}")
 
     print(f"\n{'=' * 80}")
-    print(f"{'Dataset':<10} {'Samples':<8} {'SBP range':<18} {'MAE':<10} {'MAPE':<10} {'R2':<10}")
+    print(
+        f"{'Dataset':<10} {'Samples':<8} {'SBP range':<18} {'MAE':<10} {'MAPE':<10} {'R2':<10}"
+    )
     print("-" * 66)
 
     per_ds_results = []
@@ -290,14 +310,18 @@ def main():
         mae_ds = mean_absolute_error(yt, yp)
         mape_ds = mean_absolute_percentage_error(yt, yp) * 100
         r2_ds = r2_score(yt, yp)
-        per_ds_results.append({
-            "label": f"{ds_id:.0f}",
-            "mae": mae_ds,
-            "mape": mape_ds,
-            "r2": r2_ds,
-            "samples": mask.sum(),
-        })
-        print(f"{ds_id:<10.0f} {mask.sum():<8} {yt.min():.0f}-{yt.max():.0f} mmHg{'':>8} {mae_ds:<10.2f} {mape_ds:<10.2f} {r2_ds:<10.4f}")
+        per_ds_results.append(
+            {
+                "label": f"{ds_id:.0f}",
+                "mae": mae_ds,
+                "mape": mape_ds,
+                "r2": r2_ds,
+                "samples": mask.sum(),
+            }
+        )
+        print(
+            f"{ds_id:<10.0f} {mask.sum():<8} {yt.min():.0f}-{yt.max():.0f} mmHg{'':>8} {mae_ds:<10.2f} {mape_ds:<10.2f} {r2_ds:<10.4f}"
+        )
 
     results_df = pd.DataFrame(per_ds_results)
     results_df.to_csv("multi_dataset_results.csv", index=False)
@@ -323,7 +347,9 @@ def main():
     plt.ylim(lims)
     plt.xlabel("Actual SBP (mmHg)")
     plt.ylabel("Predicted SBP (mmHg)")
-    plt.title(f"SBP Regression (Multi-Dataset)\nMAE={mae:.2f} mmHg, MAPE={mape:.2f}%, R2={r2:.4f}")
+    plt.title(
+        f"SBP Regression (Multi-Dataset)\nMAE={mae:.2f} mmHg, MAPE={mape:.2f}%, R2={r2:.4f}"
+    )
     plt.tight_layout()
     plt.savefig("actual_vs_predicted_multi.png", dpi=150)
     print("Chart saved: actual_vs_predicted_multi.png")
