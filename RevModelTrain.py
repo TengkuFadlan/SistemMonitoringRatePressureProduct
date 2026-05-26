@@ -18,7 +18,7 @@ from scipy.signal import butter, filtfilt, iirnotch, medfilt, find_peaks
 ############################
 
 # ── 1) LOAD DATA
-df = pd.read_csv("df.csv")
+df = pd.read_csv("BloodPressureDataset/11.csv")
 fs = 125  # Hz sampling rate
 dt = 1 / fs  # 0.008 detik (interval antar sampel)
 
