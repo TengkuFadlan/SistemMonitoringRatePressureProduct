@@ -1,3 +1,5 @@
+import csv
+import os
 import sys
 import time
 import warnings
@@ -15,6 +17,7 @@ from PySide6.QtCore import QTimer, QObject
 from PySide6.QtGui import QAction, QFont
 from PySide6.QtWidgets import (
     QApplication,
+    QCheckBox,
     QComboBox,
     QFrame,
     QGridLayout,
@@ -120,13 +123,13 @@ def coefficient_of_variation(x):
 
 
 FEATURE_FUNCS = {
-    "ecg_sf":            shape_factor,
-    "ecg_mobility":      mobility,
-    "ecg_skewness":      skewness,
-    "ecg_complexity":    complexity,
-    "ecg_cm10":          cm10,
-    "ecg_mean":          ecg_mean,
-    "ecg_cv":            coefficient_of_variation,
+    "ecg_sf": shape_factor,
+    "ecg_mobility": mobility,
+    "ecg_skewness": skewness,
+    "ecg_complexity": complexity,
+    "ecg_cm10": cm10,
+    "ecg_mean": ecg_mean,
+    "ecg_cv": coefficient_of_variation,
 }
 
 
@@ -348,6 +351,9 @@ class ShimmerReader(QObject):
         self.sample_count = 0
         self.ser = None
         self.shim = None
+        self.recording_file = None
+        self.recording_writer = None
+        self.recording_start_time = None
 
     def handler(self, pkt: DataPacket):
         try:
@@ -356,8 +362,28 @@ class ShimmerReader(QObject):
             ecg_mv = signed * SENS_MV
             self.buf.append(ecg_mv)
             self.sample_count += 1
+
+            if self.recording_writer is not None:
+                ts_ms = (time.time() - self.recording_start_time) * 1000
+                self.recording_writer.writerow(
+                    [f"{ts_ms:.3f}", self.sample_count, f"{ecg_mv:.6f}"]
+                )
         except Exception:
             pass
+
+    def start_recording(self, filepath: str):
+        os.makedirs(os.path.dirname(filepath) or ".", exist_ok=True)
+        self.recording_file = open(filepath, "w", newline="")
+        self.recording_writer = csv.writer(self.recording_file)
+        self.recording_writer.writerow(["timestamp_ms", "sample_index", "raw_ecg_mv"])
+        self.recording_start_time = time.time()
+
+    def stop_recording(self):
+        if self.recording_file is not None:
+            self.recording_file.close()
+            self.recording_file = None
+            self.recording_writer = None
+            self.recording_start_time = None
 
     def init_shimmer(self):
         self.ser = serial.Serial(PORT, baudrate=DEFAULT_BAUDRATE, timeout=None)
@@ -370,6 +396,7 @@ class ShimmerReader(QObject):
         self.shim.start_streaming()
 
     def close(self):
+        self.stop_recording()
         try:
             if self.shim is not None:
                 self.shim.stop_streaming()
@@ -426,6 +453,7 @@ class RPPMonitorWindow(QMainWindow):
         self.selected_phase = None
         self.session_id = 0
         self.session_start_time = None
+        self.recording_filepath = None
         self.rest_done = False
         self.post_done = False
 
@@ -498,6 +526,9 @@ class RPPMonitorWindow(QMainWindow):
         self.phase_combo = QComboBox()
         self.phase_combo.addItems(["REST", "POST-EXERCISE", "RECOVERY"])
 
+        self.rekam_ecg_checkbox = QCheckBox("Rekam sinyal ECG (raw)")
+        self.rekam_ecg_checkbox.setChecked(False)
+
         self.phase_hint = QLabel("Urutan fase wajib: REST → POST-EXERCISE → RECOVERY")
         self.phase_hint.setWordWrap(True)
         self.phase_hint.setObjectName("HintLabel")
@@ -523,6 +554,7 @@ class RPPMonitorWindow(QMainWindow):
         side.addWidget(self.btn_start)
         side.addWidget(self.btn_menu)
         side.addWidget(self.btn_save)
+        side.addWidget(self.rekam_ecg_checkbox)
         side.addWidget(self.phase_hint)
         side.addWidget(self.status_panel)
         side.addStretch(1)
@@ -674,6 +706,21 @@ class RPPMonitorWindow(QMainWindow):
             color: #dbeafe;
             font-size: 11pt;
         }
+        QCheckBox {
+            color: #cbd5e1;
+            spacing: 10px;
+        }
+        QCheckBox::indicator {
+            width: 20px;
+            height: 20px;
+            border: 2px solid #334155;
+            border-radius: 6px;
+            background: #0f172a;
+        }
+        QCheckBox::indicator:checked {
+            background: #22c55e;
+            border-color: #22c55e;
+        }
         QPushButton {
             background: #172554;
             border: 1px solid #1d4ed8;
@@ -768,13 +815,23 @@ class RPPMonitorWindow(QMainWindow):
         self.reset_session_display_only()
         self.app_mode = "MONITOR"
 
+        if self.rekam_ecg_checkbox.isChecked():
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            self.recording_filepath = (
+                f"ecg_recordings/ecg_session{self.session_id}_{ts}.csv"
+            )
+            self.reader.start_recording(self.recording_filepath)
+
         if phase_name == "RECOVERY":
             self.recovery_start_time = time.time()
 
         self.card_phase.update_card(
             phase_name, f"Session #{self.session_id}", "#34d399"
         )
-        self._set_status_message(f"Monitoring fase {phase_name} dimulai.")
+        msg = f"Monitoring fase {phase_name} dimulai."
+        if self.recording_filepath:
+            msg += f" Merekam ECG ke {self.recording_filepath}"
+        self._set_status_message(msg)
 
     def back_to_menu(self):
         if self.selected_phase == "REST":
@@ -782,6 +839,8 @@ class RPPMonitorWindow(QMainWindow):
         elif self.selected_phase == "POST-EXERCISE":
             self.post_done = True
 
+        self.reader.stop_recording()
+        self.recording_filepath = None
         self.save_current_session()
         self.selected_phase = None
         self.app_mode = "READY"
@@ -826,7 +885,11 @@ class RPPMonitorWindow(QMainWindow):
 
                 raw = np.array(self.reader.buf)
                 ecg_clean = notch_filter(bandpass_filter(raw))
-                ecg_norm = (ecg_clean - self.ecg_stats["mean"]) / self.ecg_stats["std"]
+                ecg_mean_val = ecg_clean.mean()
+                ecg_std_val = ecg_clean.std()
+                if ecg_std_val == 0:
+                    ecg_std_val = 1.0
+                ecg_norm = (ecg_clean - ecg_mean_val) / ecg_std_val
                 y_der = np.gradient(ecg_norm, 1 / FS)
                 y_sq = y_der**2
                 y_mwi = np.convolve(y_sq, mwi_kernel, mode="same")
