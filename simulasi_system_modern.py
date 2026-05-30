@@ -58,6 +58,16 @@ SBP_RECOVERY_HIGH = 140.0
 mwi_win = int(0.150 * FS)
 mwi_kernel = np.ones(mwi_win) / mwi_win
 
+# Quality check constants
+MIN_HR_BPM = 40
+MAX_HR_BPM = 180
+MAX_FLATLINE_PCT = 0.20
+MAX_CLIP_PCT = 0.05
+MAX_BASELINE_STD = 0.35
+MIN_PEAKS = 8
+MAX_PEAKS = 80
+MAX_RR_CV = 0.25
+
 
 # =========================
 # 2. UTILITAS SINYAL
@@ -152,6 +162,76 @@ def extract_actual_sbp(abp_segment, fs=FS, epoch_sec=BUF_SEC):
 
 def safe_mean(values):
     return float(np.mean(values)) if values else None
+
+
+# =========================
+# 2A. QUALITY CHECK ECG
+# =========================
+def moving_average(x, w):
+    if w <= 1:
+        return x.copy()
+    k = np.ones(w) / w
+    return np.convolve(x, k, mode="same")
+
+
+def robust_zscore(x):
+    med = np.median(x)
+    mad = np.median(np.abs(x - med)) + 1e-9
+    return 0.6745 * (x - med) / mad
+
+
+def detect_flatline_ratio(x, eps=1e-6):
+    dx = np.abs(np.diff(x))
+    return np.mean(dx < eps)
+
+
+def detect_clip_ratio(x):
+    z = robust_zscore(x)
+    return np.mean(np.abs(z) > 8.0)
+
+
+def ecg_quality_check(ecg_raw, ecg_clean, y_mwi, peaks, fs=FS):
+    reasons = []
+
+    flat_ratio = detect_flatline_ratio(ecg_raw)
+    if flat_ratio > MAX_FLATLINE_PCT:
+        reasons.append(f"flatline tinggi ({flat_ratio:.2f})")
+
+    clip_ratio = detect_clip_ratio(ecg_raw)
+    if clip_ratio > MAX_CLIP_PCT:
+        reasons.append(f"outlier ekstrem ({clip_ratio:.2f})")
+
+    baseline = moving_average(ecg_clean, int(1.0 * fs))
+    baseline_std = np.std(baseline) / (np.std(ecg_clean) + 1e-9)
+    if baseline_std > MAX_BASELINE_STD:
+        reasons.append(f"baseline drift tinggi ({baseline_std:.2f})")
+
+    n_peaks = len(peaks)
+    if n_peaks < MIN_PEAKS or n_peaks > MAX_PEAKS:
+        reasons.append(f"jumlah peak tidak wajar ({n_peaks})")
+
+    hr_est = (n_peaks / BUF_SEC) * 60.0
+    if hr_est < MIN_HR_BPM or hr_est > MAX_HR_BPM:
+        reasons.append(f"HR tidak masuk akal ({hr_est:.1f} bpm)")
+
+    if n_peaks >= 3:
+        rr = np.diff(peaks) / fs
+        rr_cv = np.std(rr) / (np.mean(rr) + 1e-9)
+        if rr_cv > MAX_RR_CV:
+            reasons.append(f"RR tidak stabil ({rr_cv:.2f})")
+    else:
+        rr_cv = None
+
+    is_good = len(reasons) == 0
+    return {
+        "is_good": is_good,
+        "hr_est": hr_est,
+        "flat_ratio": flat_ratio,
+        "clip_ratio": clip_ratio,
+        "baseline_std_ratio": baseline_std,
+        "rr_cv": rr_cv,
+        "reasons": "; ".join(reasons) if reasons else "OK",
+    }
 
 
 def classify_load(rpp, baseline_rpp, phase):
@@ -430,6 +510,12 @@ class RPPMonitorWindow(QMainWindow):
         self.preprocess_feat_times = []
         self.predict_times = []
 
+        self.qc_bad_streak = 0
+        self.qc_consecutive_required = 3
+
+        self.last_peaks = None
+        self.last_peak_sample_count = None
+
         self._build_ui()
         self._apply_theme()
         self._connect_signals()
@@ -540,6 +626,10 @@ class RPPMonitorWindow(QMainWindow):
         self.ecg_plot.setLabel("left", "Amplitude (norm)")
         self.ecg_plot.setLabel("bottom", "Samples")
         self.ecg_curve = self.ecg_plot.plot(pen=pg.mkPen("#22c55e", width=2))
+        self.ecg_peaks = pg.ScatterPlotItem(
+            size=10, pen=pg.mkPen(None), brush=pg.mkBrush("#ef4444"), symbol="x"
+        )
+        self.ecg_plot.addItem(self.ecg_peaks)
 
         self.rpp_plot = pg.PlotWidget(title="RPP Trend")
         self.rpp_plot.setObjectName("PlotCard")
@@ -566,6 +656,7 @@ class RPPMonitorWindow(QMainWindow):
         self.benchmark_label = QLabel("Benchmark: --")
         self.hemo_label = QLabel("Flag hemodinamik: --")
         self.hrr_label = QLabel("HRR: --")
+        self.qc_label = QLabel("Kualitas Sinyal: --")
         self.sbp_mape_label = QLabel("SBP MAPE: --")
         self.sbp_r2_label = QLabel("SBP R²: --")
         self.sbp_n_label = QLabel("SBP Samples: --")
@@ -578,6 +669,7 @@ class RPPMonitorWindow(QMainWindow):
             self.benchmark_label,
             self.hemo_label,
             self.hrr_label,
+            self.qc_label,
             self.sbp_mape_label,
             self.sbp_r2_label,
             self.sbp_n_label,
@@ -732,6 +824,9 @@ class RPPMonitorWindow(QMainWindow):
         self.rpp_history.clear()
         self.sbp_pred_all = []
         self.sbp_actual_all = []
+        self.qc_bad_streak = 0
+        self.last_peaks = None
+        self.last_peak_sample_count = None
         self.card_hr.update_card("-- BPM", "Realtime")
         self.card_sbp.update_card("-- mmHg", "Prediksi")
         self.card_actual_sbp.update_card("-- mmHg", "Dari ABP")
@@ -747,6 +842,8 @@ class RPPMonitorWindow(QMainWindow):
         self.sbp_mape_label.setText("SBP MAPE: --")
         self.sbp_r2_label.setText("SBP R²: --")
         self.sbp_n_label.setText("SBP Samples: --")
+        self.qc_label.setText("Kualitas Sinyal: --")
+        self.qc_label.setStyleSheet("")
 
     def start_phase_session(self):
         if not self.reader.is_loaded:
@@ -819,6 +916,15 @@ class RPPMonitorWindow(QMainWindow):
             raw_np = np.array(current_data)
             norm_view = (raw_np - raw_np.min()) / (raw_np.max() - raw_np.min() + 1e-9)
             self.ecg_curve.setData(norm_view)
+            if self.last_peak_sample_count is not None:
+                offset = self.reader.sample_count - self.last_peak_sample_count
+                adj_peaks = self.last_peaks - offset
+                valid_mask = (adj_peaks >= 0) & (adj_peaks < BUF_SZ)
+                if valid_mask.any():
+                    valid_peaks = adj_peaks[valid_mask]
+                    self.ecg_peaks.setData(valid_peaks, norm_view[valid_peaks])
+                else:
+                    self.ecg_peaks.clear()
 
         if self.app_mode != "MONITOR":
             return
@@ -865,6 +971,26 @@ class RPPMonitorWindow(QMainWindow):
                 self.preprocess_feat_times.append(end_pf - start_pf)
                 self.predict_times.append(end_pred - start_pred)
                 self.total_comp_times.append(end_total - start_total)
+
+                self.last_peaks = peaks.copy()
+                self.last_peak_sample_count = self.reader.sample_count
+
+                qc_result = ecg_quality_check(raw, ecg_clean, y_mwi, peaks)
+                qc_color = "#22c55e" if qc_result["is_good"] else "#ef4444"
+                self.qc_label.setText(
+                    f"Kualitas Sinyal: {'BAIK' if qc_result['is_good'] else 'BERMASALAH'}"
+                )
+                self.qc_label.setStyleSheet(f"color: {qc_color};")
+
+                if not qc_result["is_good"]:
+                    self.qc_bad_streak += 1
+                    reasons = qc_result["reasons"]
+                    self._set_status_message(
+                        f"Window di-skip (QC buruk #{self.qc_bad_streak}): {reasons}"
+                    )
+                    return
+
+                self.qc_bad_streak = 0
 
                 actual_sbp = None
                 if self.reader.has_abp and len(self.reader.abp_buf) >= BUF_SZ:
@@ -1051,6 +1177,12 @@ class RPPMonitorWindow(QMainWindow):
                         "load_status": load_label,
                         "recovery_status": rec_label,
                         "hemodynamic_flag": hemo_label,
+                        "qc_status": "BAIK" if qc_result["is_good"] else "BERMASALAH",
+                        "qc_reasons": qc_result["reasons"],
+                        "qc_flat_ratio": qc_result["flat_ratio"],
+                        "qc_clip_ratio": qc_result["clip_ratio"],
+                        "qc_baseline_std_ratio": qc_result["baseline_std_ratio"],
+                        "qc_rr_cv": qc_result["rr_cv"],
                         "sbp_mae": mae_val,
                         "sbp_mape": mape_val,
                         "sbp_r2": r2_val,

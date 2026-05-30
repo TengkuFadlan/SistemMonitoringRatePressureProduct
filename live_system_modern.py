@@ -484,6 +484,9 @@ class RPPMonitorWindow(QMainWindow):
         self.qc_bad_streak = 0
         self.qc_consecutive_required = 3
 
+        self.last_peaks = None
+        self.last_peak_sample_count = None
+
         self._build_ui()
         self._apply_theme()
         self._connect_signals()
@@ -594,6 +597,10 @@ class RPPMonitorWindow(QMainWindow):
         self.ecg_plot.setLabel("left", "Amplitude (norm)")
         self.ecg_plot.setLabel("bottom", "Samples")
         self.ecg_curve = self.ecg_plot.plot(pen=pg.mkPen("#22c55e", width=2))
+        self.ecg_peaks = pg.ScatterPlotItem(
+            size=10, pen=pg.mkPen(None), brush=pg.mkBrush("#ef4444"), symbol="x"
+        )
+        self.ecg_plot.addItem(self.ecg_peaks)
 
         self.rpp_plot = pg.PlotWidget(title="RPP Trend")
         self.rpp_plot.setObjectName("PlotCard")
@@ -787,6 +794,8 @@ class RPPMonitorWindow(QMainWindow):
         self.current_session_logs = []
         self.rpp_history.clear()
         self.qc_bad_streak = 0
+        self.last_peaks = None
+        self.last_peak_sample_count = None
         self.card_hr.update_card("-- BPM", "Realtime")
         self.card_sbp.update_card("-- mmHg", "Prediksi")
         self.card_rpp.update_card("--", "RPP aktif")
@@ -874,6 +883,15 @@ class RPPMonitorWindow(QMainWindow):
             raw_np = np.array(current_data)
             norm_view = (raw_np - raw_np.min()) / (raw_np.max() - raw_np.min() + 1e-9)
             self.ecg_curve.setData(norm_view)
+            if self.last_peak_sample_count is not None:
+                offset = self.reader.sample_count - self.last_peak_sample_count
+                adj_peaks = self.last_peaks - offset
+                valid_mask = (adj_peaks >= 0) & (adj_peaks < BUF_SZ)
+                if valid_mask.any():
+                    valid_peaks = adj_peaks[valid_mask]
+                    self.ecg_peaks.setData(valid_peaks, norm_view[valid_peaks])
+                else:
+                    self.ecg_peaks.clear()
 
         if self.app_mode != "MONITOR":
             return
@@ -910,6 +928,9 @@ class RPPMonitorWindow(QMainWindow):
                 )
                 hr_val = (len(peaks) / BUF_SEC) * 60
                 rpp_val = hr_val * sbp_pred
+
+                self.last_peaks = peaks.copy()
+                self.last_peak_sample_count = self.reader.sample_count
 
                 end_pred = time.perf_counter()
                 end_total = time.perf_counter()
