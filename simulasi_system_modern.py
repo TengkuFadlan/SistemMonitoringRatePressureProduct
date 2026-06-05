@@ -827,6 +827,7 @@ class RPPMonitorWindow(QMainWindow):
         self.qc_bad_streak = 0
         self.last_peaks = None
         self.last_peak_sample_count = None
+        self.ecg_peaks.clear()
         self.card_hr.update_card("-- BPM", "Realtime")
         self.card_sbp.update_card("-- mmHg", "Prediksi")
         self.card_actual_sbp.update_card("-- mmHg", "Dari ABP")
@@ -925,6 +926,8 @@ class RPPMonitorWindow(QMainWindow):
                     self.ecg_peaks.setData(valid_peaks, norm_view[valid_peaks])
                 else:
                     self.ecg_peaks.clear()
+            else:
+                self.ecg_peaks.clear()
 
         if self.app_mode != "MONITOR":
             return
@@ -1131,6 +1134,7 @@ class RPPMonitorWindow(QMainWindow):
                     else "Peak Post-Exercise: --"
                 )
                 self.hemo_label.setText(f"Flag hemodinamik: {hemo_label}")
+                self.hemo_label.setStyleSheet(f"color: {hemo_color};")
                 self.hrr_label.setText(
                     f"HRR: {hrr_val:.1f} bpm" if hrr_val is not None else "HRR: --"
                 )

@@ -369,7 +369,8 @@ class ShimmerReader(QObject):
                     [f"{ts_ms:.3f}", self.sample_count, f"{ecg_mv:.6f}"]
                 )
         except Exception:
-            pass
+            import traceback
+            traceback.print_exc()
 
     def start_recording(self, filepath: str):
         os.makedirs(os.path.dirname(filepath) or ".", exist_ok=True)
@@ -486,6 +487,7 @@ class RPPMonitorWindow(QMainWindow):
 
         self.last_peaks = None
         self.last_peak_sample_count = None
+        self.shimmer_connected = False
 
         self._build_ui()
         self._apply_theme()
@@ -780,8 +782,12 @@ class RPPMonitorWindow(QMainWindow):
         self.status_message.setText(text)
 
     def connect_shimmer(self):
+        if self.shimmer_connected:
+            self._set_status_message("Shimmer sudah terhubung.")
+            return
         try:
             self.reader.init_shimmer()
+            self.shimmer_connected = True
             self.conn_label.setText(f"Status device: Terhubung ke {PORT}")
             self._set_status_message(
                 "Shimmer berhasil terhubung. Silakan mulai fase REST."
@@ -796,6 +802,7 @@ class RPPMonitorWindow(QMainWindow):
         self.qc_bad_streak = 0
         self.last_peaks = None
         self.last_peak_sample_count = None
+        self.ecg_peaks.clear()
         self.card_hr.update_card("-- BPM", "Realtime")
         self.card_sbp.update_card("-- mmHg", "Prediksi")
         self.card_rpp.update_card("--", "RPP aktif")
@@ -892,6 +899,8 @@ class RPPMonitorWindow(QMainWindow):
                     self.ecg_peaks.setData(valid_peaks, norm_view[valid_peaks])
                 else:
                     self.ecg_peaks.clear()
+            else:
+                self.ecg_peaks.clear()
 
         if self.app_mode != "MONITOR":
             return
@@ -1052,6 +1061,7 @@ class RPPMonitorWindow(QMainWindow):
                     else "Peak Post-Exercise: --"
                 )
                 self.hemo_label.setText(f"Flag hemodinamik: {hemo_label}")
+                self.hemo_label.setStyleSheet(f"color: {hemo_color};")
                 self.hrr_label.setText(
                     f"HRR: {hrr_val:.1f} bpm" if hrr_val is not None else "HRR: --"
                 )
