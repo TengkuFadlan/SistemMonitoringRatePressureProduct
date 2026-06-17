@@ -8,7 +8,7 @@ from scipy.signal import butter, filtfilt, iirnotch, lfilter, medfilt, find_peak
 import joblib
 
 # ── 1) LOAD YOUR DATA
-df = pd.read_csv('df.csv')
+df = pd.read_csv('BloodPressureDataset/8.csv')
 
 # ── 2) SETUP FILTERS & PARAMETERS
 fs = 125 # Hz sampling rate

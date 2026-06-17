@@ -110,26 +110,12 @@ def cm10(x):
     return np.mean((x - mu) ** 10)
 
 
-def ecg_mean(x):
-    return np.mean(x)
-
-
-def coefficient_of_variation(x):
-    mu = np.mean(x)
-    s = np.std(x, ddof=1)
-    if mu == 0:
-        return 0.0
-    return (s / mu) * 100
-
-
 FEATURE_FUNCS = {
-    "ecg_sf": shape_factor,
-    "ecg_mobility": mobility,
-    "ecg_skewness": skewness,
-    "ecg_complexity": complexity,
-    "ecg_cm10": cm10,
-    "ecg_mean": ecg_mean,
-    "ecg_cv": coefficient_of_variation,
+    "ecg_sf":            shape_factor,
+    "ecg_mobility":      mobility,
+    "ecg_skewness":      skewness,
+    "ecg_complexity":    complexity,
+    "ecg_cm10":          cm10,
 }
 
 
