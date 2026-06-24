@@ -241,11 +241,11 @@ for start, end in epoch_indices:
     # Hitung semua fitur menggunakan fungsi yang sudah diperbaiki di Tahap 2
     feature_dict = {
         # --- 7 Fitur Utama ---
-        #'ecg_mean': mean_feature(ecg_epoch),
+        'ecg_mean': mean_feature(ecg_epoch),
         "ecg_sf": shape_factor(ecg_epoch),
         "ecg_mobility": hjorth_mobility(ecg_epoch, fs=fs),
         "ecg_skewness": skewness(ecg_epoch),
-        #'ecg_cv': coefficient_of_variation(ecg_epoch),
+        'ecg_cv': coefficient_of_variation(ecg_epoch),
         "ecg_complexity": hjorth_complexity(ecg_epoch, fs=fs),
         "ecg_cm10": central_moment_10(ecg_epoch),
         # --- Fitur Tambahan & Pendukung Model ---
@@ -278,14 +278,8 @@ epoch_df.tail()
 ##############################
 
 # 1) Definisi Fitur & Target
-# feature_columns = ["ecg_mean", "ecg_sf", "ecg_mobility", "ecg_skewness", "ecg_cv", "ecg_complexity", "ecg_cm10"]
-feature_columns = [
-    "ecg_sf",
-    "ecg_mobility",
-    "ecg_skewness",
-    "ecg_complexity",
-    "ecg_cm10",
-]
+feature_columns = ["ecg_mean", "ecg_sf", "ecg_mobility", "ecg_skewness", "ecg_cv", "ecg_complexity", "ecg_cm10"]
+#feature_columns = ["ecg_sf","ecg_mobility","ecg_skewness","ecg_complexity","ecg_cm10",]
 target_sbp = "systolic"
 
 epoch_df.dropna(inplace=True)

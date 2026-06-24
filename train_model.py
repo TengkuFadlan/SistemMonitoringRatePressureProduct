@@ -80,7 +80,7 @@ if kernel % 2 == 0:
     kernel += 1
 
 epoch_indices = []
-epoch_sbp, epoch_dbp = [], []
+epoch_sbp = []
 num_epochs = len(df) // samples_per_epoch
 
 for i in range(num_epochs):
@@ -96,23 +96,12 @@ for i in range(num_epochs):
     locs_s, _ = find_peaks(abp_smooth, distance=int(0.333 * fs))
     vals_s = abp_seg[locs_s]
 
-    # Deteksi Diastolic (Mencari lembah tekanan darah)
-    locs_d = []
-    for j in range(len(locs_s) - 1):
-        seg = abp_smooth[locs_s[j] : locs_s[j + 1]]
-        if seg.size:
-            trough = np.argmin(seg)
-            locs_d.append(locs_s[j] + trough)
-    vals_d = abp_seg[locs_d]
-
-    # Ambil median dari SBP dan DBP per epoch (window 20 detik)
+    # Ambil median dari SBP per epoch (window 20 detik)
     sbp = np.median(np.sort(vals_s)[-epoch_sec:]) if vals_s.size else np.nan
-    dbp = np.median(np.sort(vals_d)[-epoch_sec:]) if vals_d.size else np.nan
 
     epoch_sbp.append(sbp)
-    epoch_dbp.append(dbp)
 
-epoch_df = pd.DataFrame({"systolic": epoch_sbp, "diastolic": epoch_dbp})
+epoch_df = pd.DataFrame({"systolic": epoch_sbp})
 
 ##############################
 ##### 2. Definisi Fungsi #####
@@ -225,7 +214,6 @@ epoch_df.tail()
 ##############################
 
 # 1) Definisi Fitur & Target
-# feature_columns = ["ecg_mean", "ecg_sf", "ecg_mobility", "ecg_skewness", "ecg_cv", "ecg_complexity", "ecg_cm10"]
 feature_columns = [
     "ecg_sf",
     "ecg_mobility",
