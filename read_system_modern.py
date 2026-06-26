@@ -10,8 +10,6 @@ import numpy as np
 import pandas as pd
 from scipy.signal import butter, filtfilt, iirnotch, find_peaks
 import joblib
-import serial
-from serial import SerialException
 
 from PySide6.QtCore import QTimer, QObject
 from PySide6.QtGui import QAction, QFont
@@ -19,6 +17,7 @@ from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
+    QFileDialog,
     QFrame,
     QGridLayout,
     QHBoxLayout,
@@ -26,12 +25,12 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QPushButton,
+    QProgressBar,
     QVBoxLayout,
     QWidget,
 )
 
 import pyqtgraph as pg
-from pyshimmer import ShimmerBluetooth, DEFAULT_BAUDRATE, DataPacket, EChannelType
 
 warnings.filterwarnings(
     "ignore",
@@ -41,15 +40,9 @@ warnings.filterwarnings(
 # =========================
 # 1. KONFIGURASI SISTEM
 # =========================
-PORT = "/dev/rfcomm0"
 FS = 125
 BUF_SEC = 20
 BUF_SZ = FS * BUF_SEC
-
-V_REF = 2.42
-GAIN = 4
-SENS_MV = V_REF / (GAIN * (2**23 - 1)) * 1000
-CH_ECG = EChannelType.EXG_ADS1292R_1_CH1_24BIT
 
 # Relative load thresholds terhadap baseline REST
 LOAD_MILD_RATIO = 1.20
@@ -62,7 +55,7 @@ MOD_RECOVERY_PCT = 25.0
 ABNORMAL_HRR_1MIN = 12.0
 
 # Hemodynamic support thresholds
-SBP_EXAGGERATED = 180.0  # konservatif untuk early warning monitoring
+SBP_EXAGGERATED = 180.0
 SBP_VERY_HIGH = 210.0
 SBP_RECOVERY_HIGH = 140.0
 
@@ -73,10 +66,6 @@ mwi_kernel = np.ones(mwi_win) / mwi_win
 # =========================
 # 2. UTILITAS SINYAL
 # =========================
-def to_signed24(x):
-    return x - 0x1000000 if (x & 0x800000) else x
-
-
 def shape_factor(x):
     xrms = np.sqrt(np.mean(x**2))
     msa = np.mean(np.sqrt(np.abs(x)))
@@ -193,7 +182,6 @@ def classify_recovery(
     if peak_hr is not None:
         hrr_val = peak_hr - current_hr
 
-    # Jika sudah melewati ~1 menit recovery, pakai kombinasi %recovery + HRR
     if (
         elapsed_recovery_sec is not None
         and elapsed_recovery_sec >= 60
@@ -205,7 +193,6 @@ def classify_recovery(
             return "Recovery cukup", "#facc15", recovery_drop, recovery_pct, hrr_val
         return "Recovery lambat", "#ef4444", recovery_drop, recovery_pct, hrr_val
 
-    # Sebelum 1 menit, tampilkan progres recovery sementara
     if recovery_pct >= GOOD_RECOVERY_PCT:
         return "Recovery menuju baik", "#22c55e", recovery_drop, recovery_pct, hrr_val
     elif recovery_pct >= MOD_RECOVERY_PCT:
@@ -283,33 +270,27 @@ def detect_clip_ratio(x):
 def ecg_quality_check(ecg_raw, ecg_clean, y_mwi, peaks, fs=FS):
     reasons = []
 
-    # 1) Flatline / data nyangkut
     flat_ratio = detect_flatline_ratio(ecg_raw)
     if flat_ratio > MAX_FLATLINE_PCT:
         reasons.append(f"flatline tinggi ({flat_ratio:.2f})")
 
-    # 2) Clip / outlier ekstrem
     clip_ratio = detect_clip_ratio(ecg_raw)
     if clip_ratio > MAX_CLIP_PCT:
         reasons.append(f"outlier ekstrem ({clip_ratio:.2f})")
 
-    # 3) Baseline wander besar
     baseline = moving_average(ecg_clean, int(1.0 * fs))
     baseline_std = np.std(baseline) / (np.std(ecg_clean) + 1e-9)
     if baseline_std > MAX_BASELINE_STD:
         reasons.append(f"baseline drift tinggi ({baseline_std:.2f})")
 
-    # 4) Jumlah peak tidak masuk akal
     n_peaks = len(peaks)
     if n_peaks < MIN_PEAKS or n_peaks > MAX_PEAKS:
         reasons.append(f"jumlah peak tidak wajar ({n_peaks})")
 
-    # 5) HR range check
     hr_est = (n_peaks / BUF_SEC) * 60.0
     if hr_est < MIN_HR_BPM or hr_est > MAX_HR_BPM:
         reasons.append(f"HR tidak masuk akal ({hr_est:.1f} bpm)")
 
-    # 6) RR interval stability check
     if n_peaks >= 3:
         rr = np.diff(peaks) / fs
         rr_cv = np.std(rr) / (np.mean(rr) + 1e-9)
@@ -330,71 +311,49 @@ def ecg_quality_check(ecg_raw, ecg_clean, y_mwi, peaks, fs=FS):
     }
 
 
-class ShimmerReader(QObject):
-    def __init__(self):
+# =========================
+# 3. FILE READER (pengganti ShimmerReader)
+# =========================
+class FileReader(QObject):
+    def __init__(self, filepath=None):
         super().__init__()
         self.buf = deque(maxlen=BUF_SZ)
         self.sample_count = 0
-        self.ser = None
-        self.shim = None
-        self.recording_file = None
-        self.recording_writer = None
-        self.recording_start_time = None
+        self.filepath = filepath
+        self.data = None
+        self.total_samples = 0
+        self.pos = 0
+        self.finished = False
+        self.loaded = False
 
-    def handler(self, pkt: DataPacket):
-        try:
-            raw_counts = pkt[CH_ECG]
-            signed = to_signed24(raw_counts)
-            ecg_mv = signed * SENS_MV
-            self.buf.append(ecg_mv)
+    def load_file(self, filepath):
+        df = pd.read_csv(filepath)
+        self.data = df["raw_ecg_mv"].values
+        self.total_samples = len(self.data)
+        self.filepath = filepath
+        self.pos = 0
+        self.sample_count = 0
+        self.finished = False
+        self.loaded = True
+        self.buf.clear()
+
+    def feed_chunk(self):
+        if self.finished or not self.loaded:
+            return
+        chunk_size = max(1, int(FS * 0.05))
+        end = min(self.pos + chunk_size, self.total_samples)
+        for i in range(self.pos, end):
+            self.buf.append(float(self.data[i]))
             self.sample_count += 1
+        self.pos = end
+        if self.pos >= self.total_samples:
+            self.finished = True
 
-            if self.recording_writer is not None:
-                ts_ms = (time.time() - self.recording_start_time) * 1000
-                self.recording_writer.writerow(
-                    [f"{ts_ms:.3f}", self.sample_count, f"{ecg_mv:.6f}"]
-                )
-        except Exception:
-            import traceback
-            traceback.print_exc()
-
-    def start_recording(self, filepath: str):
-        os.makedirs(os.path.dirname(filepath) or ".", exist_ok=True)
-        self.recording_file = open(filepath, "w", newline="")
-        self.recording_writer = csv.writer(self.recording_file)
-        self.recording_writer.writerow(["timestamp_ms", "sample_index", "raw_ecg_mv"])
-        self.recording_start_time = time.time()
-
-    def stop_recording(self):
-        if self.recording_file is not None:
-            self.recording_file.close()
-            self.recording_file = None
-            self.recording_writer = None
-            self.recording_start_time = None
-
-    def init_shimmer(self):
-        self.ser = serial.Serial(PORT, baudrate=DEFAULT_BAUDRATE, timeout=None)
-        time.sleep(2)
-        self.shim = ShimmerBluetooth(self.ser)
-        self.shim.initialize()
-        if CH_ECG not in self.shim.get_data_types():
-            raise RuntimeError("ECG channel tidak aktif di Shimmer.")
-        self.shim.add_stream_callback(self.handler)
-        self.shim.start_streaming()
-
-    def close(self):
-        self.stop_recording()
-        try:
-            if self.shim is not None:
-                self.shim.stop_streaming()
-        except Exception:
-            pass
-        time.sleep(0.3)
-        try:
-            if self.ser is not None:
-                self.ser.close()
-        except Exception:
-            pass
+    @property
+    def progress_pct(self):
+        if self.total_samples == 0:
+            return 0.0
+        return min(100.0, self.pos / self.total_samples * 100.0)
 
 
 class MetricCard(QFrame):
@@ -428,10 +387,10 @@ class MetricCard(QFrame):
 class RPPMonitorWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("RPP Monitoring Real-Time | Shimmer3 ECG")
+        self.setWindowTitle("RPP Monitoring | CSV File ECG")
         self.resize(1600, 920)
 
-        self.reader = ShimmerReader()
+        self.reader = FileReader()
         self.model_sbp = joblib.load("rf2_sbp.pkl")
         self.feat_scaler = joblib.load("feat_scaler.pkl")
         self.ecg_stats = joblib.load("params.pkl")
@@ -440,7 +399,6 @@ class RPPMonitorWindow(QMainWindow):
         self.selected_phase = None
         self.session_id = 0
         self.session_start_time = None
-        self.recording_filepath = None
         self.rest_done = False
         self.post_done = False
 
@@ -473,7 +431,7 @@ class RPPMonitorWindow(QMainWindow):
 
         self.last_peaks = None
         self.last_peak_sample_count = None
-        self.shimmer_connected = False
+        self.file_loaded = False
 
         self._build_ui()
         self._apply_theme()
@@ -483,7 +441,7 @@ class RPPMonitorWindow(QMainWindow):
         self.timer.timeout.connect(self.update_dashboard)
         self.timer.start(50)
 
-        self._set_status_message("Siap. Hubungkan Shimmer lalu pilih fase.")
+        self._set_status_message("Pilih file CSV ECG lalu mulai monitoring.")
 
     def _build_ui(self):
         root = QWidget()
@@ -503,22 +461,24 @@ class RPPMonitorWindow(QMainWindow):
         badge.setObjectName("AppBadge")
         title = QLabel("Estimasi Rate Pressure Product")
         title.setObjectName("MainTitle")
-        subtitle = QLabel("Shimmer3 ECG • REST → POST-EXERCISE → RECOVERY")
+        subtitle = QLabel("CSV File ECG • REST → POST-EXERCISE → RECOVERY")
         subtitle.setObjectName("SubTitle")
 
-        self.conn_label = QLabel("Status device: Belum terhubung")
+        self.conn_label = QLabel("Status file: Belum dipilih")
         self.conn_label.setObjectName("InfoPill")
 
-        self.btn_connect = QPushButton("Hubungkan Shimmer")
+        self.btn_open = QPushButton("Pilih File CSV ECG")
         self.btn_start = QPushButton("Mulai Monitoring")
         self.btn_menu = QPushButton("Akhiri Fase / Kembali")
-        self.btn_save = QPushButton("Simpan Semua Log")
 
         self.phase_combo = QComboBox()
         self.phase_combo.addItems(["REST", "POST-EXERCISE", "RECOVERY"])
 
-        self.rekam_ecg_checkbox = QCheckBox("Rekam sinyal ECG (raw)")
-        self.rekam_ecg_checkbox.setChecked(False)
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setTextVisible(True)
+        self.progress_bar.setFormat("Progress: %p%")
 
         self.phase_hint = QLabel("Urutan fase wajib: REST → POST-EXERCISE → RECOVERY")
         self.phase_hint.setWordWrap(True)
@@ -541,11 +501,10 @@ class RPPMonitorWindow(QMainWindow):
         side.addSpacing(8)
         side.addWidget(self.conn_label)
         side.addWidget(self.phase_combo)
-        side.addWidget(self.btn_connect)
+        side.addWidget(self.btn_open)
         side.addWidget(self.btn_start)
         side.addWidget(self.btn_menu)
-        side.addWidget(self.btn_save)
-        side.addWidget(self.rekam_ecg_checkbox)
+        side.addWidget(self.progress_bar)
         side.addWidget(self.phase_hint)
         side.addWidget(self.status_panel)
         side.addStretch(1)
@@ -701,21 +660,6 @@ class RPPMonitorWindow(QMainWindow):
             color: #dbeafe;
             font-size: 11pt;
         }
-        QCheckBox {
-            color: #cbd5e1;
-            spacing: 10px;
-        }
-        QCheckBox::indicator {
-            width: 20px;
-            height: 20px;
-            border: 2px solid #334155;
-            border-radius: 6px;
-            background: #0f172a;
-        }
-        QCheckBox::indicator:checked {
-            background: #22c55e;
-            border-color: #22c55e;
-        }
         QPushButton {
             background: #172554;
             border: 1px solid #1d4ed8;
@@ -742,6 +686,18 @@ class RPPMonitorWindow(QMainWindow):
             selection-background-color: #1d4ed8;
             border: 1px solid #334155;
         }
+        QProgressBar {
+            background: #0f172a;
+            border: 1px solid #334155;
+            border-radius: 10px;
+            text-align: center;
+            color: #e5eefb;
+            font-weight: 600;
+        }
+        QProgressBar::chunk {
+            background: #22c55e;
+            border-radius: 9px;
+        }
         """)
         pg.setConfigOptions(antialias=True)
         bg = "#111827"
@@ -755,10 +711,9 @@ class RPPMonitorWindow(QMainWindow):
             pw.getPlotItem().titleLabel.item.setDefaultTextColor(fg)  # type: ignore
 
     def _connect_signals(self):
-        self.btn_connect.clicked.connect(self.connect_shimmer)
+        self.btn_open.clicked.connect(self.open_csv_file)
         self.btn_start.clicked.connect(self.start_phase_session)
         self.btn_menu.clicked.connect(self.back_to_menu)
-        self.btn_save.clicked.connect(self.save_all_logs)
 
         exit_action = QAction("Keluar", self)
         exit_action.triggered.connect(self.close)
@@ -767,20 +722,29 @@ class RPPMonitorWindow(QMainWindow):
     def _set_status_message(self, text):
         self.status_message.setText(text)
 
-    def connect_shimmer(self):
-        if self.shimmer_connected:
-            self._set_status_message("Shimmer sudah terhubung.")
+    def open_csv_file(self):
+        filepath, _ = QFileDialog.getOpenFileName(
+            self,
+            "Pilih File CSV ECG",
+            "",
+            "CSV Files (*.csv);;All Files (*)",
+        )
+        if not filepath:
             return
         try:
-            self.reader.init_shimmer()
-            self.shimmer_connected = True
-            self.conn_label.setText(f"Status device: Terhubung ke {PORT}")
+            self.reader.load_file(filepath)
+            self.file_loaded = True
+            fname = os.path.basename(filepath)
+            total_sec = self.reader.total_samples / FS
+            self.conn_label.setText(f"File: {fname} | {self.reader.total_samples} sampel ({total_sec:.1f} s)")
             self._set_status_message(
-                "Shimmer berhasil terhubung. Silakan mulai fase REST."
+                f"File berhasil dimuat: {fname}. Pilih fase lalu mulai monitoring."
             )
+            self.progress_bar.setValue(0)
         except Exception as e:
-            self.conn_label.setText("Status device: Gagal terhubung")
-            QMessageBox.critical(self, "Koneksi gagal", str(e))
+            self.conn_label.setText("Status file: Gagal dimuat")
+            QMessageBox.critical(self, "Gagal memuat file", str(e))
+            self.file_loaded = False
 
     def reset_session_display_only(self):
         self.current_session_logs = []
@@ -803,6 +767,10 @@ class RPPMonitorWindow(QMainWindow):
         self.qc_label.setStyleSheet("")
 
     def start_phase_session(self):
+        if not self.file_loaded:
+            self._set_status_message("Pilih file CSV ECG terlebih dahulu.")
+            return
+
         phase_name = self.phase_combo.currentText()
         if phase_name == "POST-EXERCISE" and not self.rest_done:
             self._set_status_message("Jalankan fase REST terlebih dahulu.")
@@ -817,12 +785,11 @@ class RPPMonitorWindow(QMainWindow):
         self.reset_session_display_only()
         self.app_mode = "MONITOR"
 
-        if self.rekam_ecg_checkbox.isChecked():
-            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-            self.recording_filepath = (
-                f"ecg_recordings/ecg_session{self.session_id}_{ts}.csv"
-            )
-            self.reader.start_recording(self.recording_filepath)
+        self.reader.pos = 0
+        self.reader.sample_count = 0
+        self.reader.finished = False
+        self.reader.buf.clear()
+        self.progress_bar.setValue(0)
 
         if phase_name == "RECOVERY":
             self.recovery_start_time = time.time()
@@ -831,8 +798,6 @@ class RPPMonitorWindow(QMainWindow):
             phase_name, f"Session #{self.session_id}", "#34d399"
         )
         msg = f"Monitoring fase {phase_name} dimulai."
-        if self.recording_filepath:
-            msg += f" Merekam ECG ke {self.recording_filepath}"
         self._set_status_message(msg)
 
     def back_to_menu(self):
@@ -841,36 +806,20 @@ class RPPMonitorWindow(QMainWindow):
         elif self.selected_phase == "POST-EXERCISE":
             self.post_done = True
 
-        self.reader.stop_recording()
-        self.recording_filepath = None
-        self.save_current_session()
         self.selected_phase = None
         self.app_mode = "READY"
         self._set_status_message("Fase diakhiri. Pilih fase berikutnya.")
 
-    def save_current_session(self):
-        if not self.current_session_logs:
-            return
-        df_session = pd.DataFrame(self.current_session_logs)
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        fname = f"rpp_session_{self.session_id}_{timestamp}.csv"
-        df_session.to_csv(fname, index=False)
-        self.all_window_logs.extend(self.current_session_logs)
-        self.current_session_logs = []
-        self._set_status_message(f"Sesi tersimpan ke {fname}")
-
-    def save_all_logs(self):
-        self.save_current_session()
-        if not self.all_window_logs:
-            self._set_status_message("Belum ada log untuk disimpan.")
-            return
-        df_all = pd.DataFrame(self.all_window_logs)
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        fname = f"rpp_monitoring_all_{timestamp}.csv"
-        df_all.to_csv(fname, index=False)
-        self._set_status_message(f"Seluruh log disimpan ke {fname}")
-
     def update_dashboard(self):
+        if self.app_mode == "MONITOR":
+            self.reader.feed_chunk()
+            pct = self.reader.progress_pct
+            self.progress_bar.setValue(int(pct))
+            if self.reader.finished:
+                self._set_status_message(
+                    f"File selesai diproses (100%). {self.reader.total_samples} sampel."
+                )
+
         current_data = list(self.reader.buf)
         if current_data:
             raw_np = np.array(current_data)
@@ -1068,52 +1017,16 @@ class RPPMonitorWindow(QMainWindow):
                 self.rpp_history.append(rpp_val)
                 self.rpp_curve.setData(list(self.rpp_history))
 
-                self.current_session_logs.append(
-                    {
-                        "session_id": self.session_id,
-                        "session_start": self.session_start_time,
-                        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                        "sample_count": self.reader.sample_count,
-                        "phase": phase,
-                        "hr_bpm": hr_val,
-                        "sbp_mmhg": sbp_pred,
-                        "rpp": rpp_val,
-                        "baseline_hr": self.baseline_hr,
-                        "baseline_sbp": self.baseline_sbp,
-                        "baseline_rpp": self.baseline_rpp,
-                        "rpp_ratio_to_baseline": rpp_ratio,
-                        "delta_rpp": delta_rpp,
-                        "post_peak_hr": self.post_peak_hr,
-                        "post_peak_sbp": self.post_peak_sbp,
-                        "post_peak_rpp": self.post_peak_rpp,
-                        "recovery_drop": rec_drop,
-                        "recovery_pct": rec_pct,
-                        "hrr_bpm": hrr_val,
-                        "load_status": load_label,
-                        "recovery_status": rec_label,
-                        "hemodynamic_flag": hemo_label,
-                        "qc_status": "BAIK" if qc_result["is_good"] else "BERMASALAH",
-                        "qc_reasons": qc_result["reasons"],
-                        "qc_flat_ratio": qc_result["flat_ratio"],
-                        "qc_clip_ratio": qc_result["clip_ratio"],
-                        "qc_baseline_std_ratio": qc_result["baseline_std_ratio"],
-                        "qc_rr_cv": qc_result["rr_cv"],
-                    }
-                )
-
             except Exception as e:
                 self._set_status_message(f"Error update: {e}")
 
     def closeEvent(self, event):
-        self.save_current_session()
-        self.save_all_logs()
-        self.reader.close()
         event.accept()
 
 
 def main():
     app = QApplication(sys.argv)
-    app.setApplicationName("RPP Monitoring Real-Time")
+    app.setApplicationName("RPP Monitoring (CSV File)")
     font = QFont("Inter", 10)
     app.setFont(font)
     win = RPPMonitorWindow()
@@ -1126,6 +1039,3 @@ if __name__ == "__main__":
         main()
     except KeyboardInterrupt:
         sys.exit(0)
-    except SerialException as e:
-        print(f"Koneksi serial gagal: {e}")
-        sys.exit(1)

@@ -918,18 +918,9 @@ class RPPMonitorWindow(QMainWindow):
                 feats_scaled = self.feat_scaler.transform(feats)
                 sbp_pred = self.model_sbp.predict(feats_scaled)[0]
 
-                peaks_mwi, _ = find_peaks(
+                peaks, _ = find_peaks(
                     y_mwi, distance=int(0.333 * FS), height=np.mean(y_mwi)
                 )
-
-                search_win = int(0.150 * FS)
-                refined = []
-                for p in peaks_mwi:
-                    left = max(0, p - search_win)
-                    right = min(len(ecg_norm), p + search_win + 1)
-                    refined.append(left + np.argmax(np.abs(ecg_norm[left:right])))
-                peaks = np.array(refined)
-
                 hr_val = (len(peaks) / BUF_SEC) * 60
                 rpp_val = hr_val * sbp_pred
 
