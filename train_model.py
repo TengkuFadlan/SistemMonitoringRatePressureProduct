@@ -205,6 +205,20 @@ features_df = features_df.reset_index(drop=True)
 # Gabungkan secara horizontal
 epoch_df = pd.concat([epoch_df, features_df], axis=1)
 
+hasil_fitur = epoch_df[
+    [
+        "ecg_sf",
+        "ecg_mobility",
+        "ecg_skewness",
+        "ecg_complexity",
+        "ecg_cm10",
+        "systolic",
+    ]
+]
+
+print(hasil_fitur.head(10))
+print(hasil_fitur.tail(10))
+
 # Tampilkan hasil akhir untuk pengecekan
 print("Fitur berhasil diekstrak. Ukuran data:", epoch_df.shape)
 epoch_df.tail()
@@ -246,6 +260,12 @@ joblib.dump(rf_sbp, "rf2_sbp.pkl")
 # 5) EVALUASI & ANALISIS
 y_pred = rf_sbp.predict(X_test_scaled)
 
+# Linear regression antara actual dan predicted
+m, b = np.polyfit(y_test, y_pred, 1)
+
+print(f"Persamaan regresi:")
+print(f"y = {m:.4f}x + {b:.4f}")
+
 mae = mean_absolute_error(y_test, y_pred)
 mape = mean_absolute_percentage_error(y_test, y_pred) * 100
 r2 = r2_score(y_test, y_pred)
@@ -268,7 +288,31 @@ plt.xlabel("Relative Importance")
 # B. ACTUAL VS PREDICTED PLOT: "Persamaan" Visual Regresi
 plt.figure(figsize=(8, 8))
 plt.scatter(y_test, y_pred, alpha=0.5)
-plt.plot([y_test.min(), y_test.max()], [y_test.min(), y_test.max()], "r--", lw=2)
+plt.plot(
+    [y_test.min(), y_test.max()],
+    [y_test.min(), y_test.max()],
+    'r--',
+    label='Ideal'
+)
+
+# Garis regresi
+x = np.linspace(y_test.min(), y_test.max(),100)
+plt.plot(
+    x,
+    m*x+b,
+    color='green',
+    linewidth=2,
+    label='Regresi'
+)
+
+plt.text(
+    0.05,
+    0.95,
+    f"y = {m:.3f}x + {b:.3f}",
+    transform=plt.gca().transAxes,
+    fontsize=11,
+    bbox=dict(facecolor='white')
+)
 plt.xlabel("Actual SBP (mmHg)")
 plt.ylabel("Predicted SBP (mmHg)")
 plt.title("Regresi Estimasi SBP")
